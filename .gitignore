@@ -2,3 +2,4 @@
 .vscode
 .cache
 src/owm_credentials.h
+.vscode/c_cpp_properties.json
