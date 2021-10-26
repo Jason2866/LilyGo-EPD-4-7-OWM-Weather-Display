@@ -1,3 +1,4 @@
 .pio
 .vscode
 .cache
+src/owm_credentials.h
