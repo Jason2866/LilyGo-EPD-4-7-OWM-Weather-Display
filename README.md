@@ -10,3 +10,5 @@ Edit `owm_credentials.h` and enter OWM API key as well as the location for which
 Since Juli 2024 it is needed to use OWM API 3.0 !!
 
 You need Platformio to compile
+
+Please note the individual licence in licence.txt
