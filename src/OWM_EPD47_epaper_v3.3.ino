@@ -1,22 +1,7 @@
-/* ESP32 Weather Display using an Display, obtains data from Open Weather Map, decodes it and then displays it.
-  ####################################################################################################################################
-  This software, the ideas and concepts is Copyright (c) David Bird 2018. All rights to this software are reserved.
 
-  Any redistribution or reproduction of any part or all of the contents in any form is prohibited other than the following:
-  1. You may print or download to a local hard disk extracts for your personal and non-commercial use only.
-  2. You may copy the content to individual third parties for their personal use, but only if you acknowledge the author David Bird as the source of the material.
-  3. You may not, except with my express written permission, distribute or commercially exploit the content.
-  4. You may not transmit it or store it in any other website or other form of electronic retrieval system for commercial purposes.
-
-  The above copyright ('as annotated') notice and this permission notice shall be included in all copies or substantial portions of the Software and where the
-  software use is visible to an end-user.
-
-  THE SOFTWARE IS PROVIDED "AS IS" FOR PRIVATE USE ONLY, IT IS NOT FOR COMMERCIAL USE IN WHOLE OR PART OR CONCEPT. FOR PERSONAL USE IT IS SUPPLIED WITHOUT WARRANTY
-  OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-  IN NO EVENT SHALL THE AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-  See more at http://www.dsbird.org.uk
-*/
+// ESP32 Weather Display and a LilyGo EPD 4.7" Display, obtains Open Weather Map data, decodes and then displays it.
+// This software, the ideas and concepts is Copyright (c) David Bird 2021. All rights to this software are reserved.
+// #################################################################################################################
 
 #include <Arduino.h>            // In-built
 #include <esp_task_wdt.h>       // In-built
@@ -40,7 +25,7 @@
 #define SCREEN_HEIGHT  EPD_HEIGHT
 
 //################  VERSION  ##################################################
-String version = "2.7 / 4.7in";  // Programme version, see change log at end
+String version = "3.3 / 4.7in";  // Programme version, see change log at end
 //################ VARIABLES ##################################################
 
 enum alignment {LEFT, RIGHT, CENTER};
@@ -61,6 +46,7 @@ boolean SmallIcon   = false;
 #define Small  10           // For icon drawing
 String  Time_str = "--:--:--";
 String  Date_str = "-- --- ----";
+String  ForecastDay;
 int     wifi_signal, CurrentHour = 0, CurrentMin = 0, CurrentSec = 0, EventCnt = 0, vref = 1100;
 //################ PROGRAM VARIABLES and OBJECTS ##########################################
 #define max_readings 24 // Limited to 3-days here, but could go to 5-days = 40 as the data is issued
@@ -74,8 +60,16 @@ float humidity_readings[max_readings]    = {0};
 float rain_readings[max_readings]        = {0};
 float snow_readings[max_readings]        = {0};
 
+typedef struct { // For current Day and Day 1, 2, 3, etc
+  String Time;
+  float  High;
+  float  Low;
+} HL_record_type;
+
+HL_record_type  HLReadings[max_readings];
+
 long SleepDuration   = 60; // Sleep time in minutes, aligned to the nearest minute boundary, so if 30 will always update at 00 or 30 past the hour
-int  WakeupHour      = 8;  // Wakeup after 07:00 to save battery power
+int  WakeupHour      = 7;  // Wakeup after 07:00 to save battery power
 int  SleepHour       = 23; // Sleep  after 23:00 to save battery power
 long StartTime       = 0;
 long SleepTimer      = 0;
@@ -211,7 +205,7 @@ bool DecodeWeather(WiFiClient& json, String Type) {
     // All Serial.println statements are for diagnostic purposes and some are not required, remove if not needed with //
     WxConditions[0].High        = -50; // Minimum forecast low
     WxConditions[0].Low         = 50;  // Maximum Forecast High
-    WxConditions[0].FTimezone   = doc["timezone_offset"]; // "0"
+    WxConditions[0].FTimezone   = doc["timezone_offset"];                          Serial.println("TZon: " + String(WxConditions[0].FTimezone));
     JsonObject current = doc["current"];
     WxConditions[0].Sunrise     = current["sunrise"];                              Serial.println("SRis: " + String(WxConditions[0].Sunrise));
     WxConditions[0].Sunset      = current["sunset"];                               Serial.println("SSet: " + String(WxConditions[0].Sunset));
@@ -237,7 +231,8 @@ bool DecodeWeather(WiFiClient& json, String Type) {
     JsonArray list                    = root["list"];
     for (byte r = 0; r < max_readings; r++) {
       Serial.println("\nPeriod-" + String(r) + "--------------");
-      WxForecast[r].Dt                = list[r]["dt"].as<int>();
+      WxForecast[r].Dt                = list[r]["dt"].as<int>();                   Serial.println(ConvertUnixTime(WxForecast[r].Dt) + " " + ForecastDay);
+      WxForecast[r].Low               = list[r]["main"]["temp_min"].as<float>();   Serial.println("TLow: " + String(WxForecast[r].Low));
       WxForecast[r].Temperature       = list[r]["main"]["temp"].as<float>();       Serial.println("Temp: " + String(WxForecast[r].Temperature));
       WxForecast[r].Low               = list[r]["main"]["temp_min"].as<float>();   Serial.println("TLow: " + String(WxForecast[r].Low));
       WxForecast[r].High              = list[r]["main"]["temp_max"].as<float>();   Serial.println("THig: " + String(WxForecast[r].High));
@@ -251,6 +246,7 @@ bool DecodeWeather(WiFiClient& json, String Type) {
         if (WxForecast[r].Low  < WxConditions[0].Low)  WxConditions[0].Low  = WxForecast[r].Low;  // Get Lowest  temperature for next 24Hrs
       }
     }
+    GetHighsandLows();
     //------------------------------------------
     float pressure_trend = WxForecast[0].Pressure - WxForecast[2].Pressure; // Measure pressure slope between ~now and later
     pressure_trend = ((int)(pressure_trend * 10)) / 10.0; // Remove any small variations less than 0.1
@@ -262,20 +258,6 @@ bool DecodeWeather(WiFiClient& json, String Type) {
     if (Units == "I") Convert_Readings_to_Imperial();
   }
   return true;
-}
-//#########################################################################################
-String ConvertUnixTime(int unix_time) {
-  // Returns either '21:12  ' or ' 09:12pm' depending on Units mode
-  time_t tm = unix_time;
-  struct tm *now_tm = localtime(&tm);
-  char output[40];
-  if (Units == "M") {
-    strftime(output, sizeof(output), "%H:%M %d/%m/%y", now_tm);
-  }
-  else {
-    strftime(output, sizeof(output), "%I:%M%P %m/%d/%y", now_tm);
-  }
-  return output;
 }
 //#########################################################################################
 bool obtainWeatherData(WiFiClient & client, const String & RequestType) {
@@ -328,7 +310,7 @@ int JulianDate(int d, int m, int y) {
 
 float SumOfPrecip(float DataArray[], int readings) {
   float sum = 0;
-  for (int i = 0; i <= readings; i++) sum += DataArray[i];
+  for (int i = 0; i < readings; i++) sum += DataArray[i];
   return sum;
 }
 
@@ -345,7 +327,7 @@ void DisplayWeather() {                          // 4.7" e-paper display is 960x
   DisplayStatusSection(600, 20, wifi_signal);    // Wi-Fi signal strength and Battery voltage
   DisplayGeneralInfoSection();                   // Top line of the display
   DisplayDisplayWindSection(137, 150, WxConditions[0].Winddir, WxConditions[0].Windspeed, 100);
-  DisplayAstronomySection(5, 252);               // Astronomy section Sun rise/set, Moon phase and Moon icon
+  DisplayAstronomySection(5, 255);               // Astronomy section Sun rise/set, Moon phase and Moon icon
   DisplayMainWeatherSection(320, 110);           // Centre section of display for Location, temperature, Weather report, current Wx Symbol
   DisplayWeatherIcon(835, 140);                  // Display weather icon scale = Large;
   DisplayForecastSection(285, 220);              // 3hr forecast boxes
@@ -356,7 +338,7 @@ void DisplayGeneralInfoSection() {
   setFont(OpenSans10B);
   drawString(5, 2, City, LEFT);
   setFont(OpenSans8B);
-  drawString(500, 2, Date_str + "  @   " + Time_str, LEFT);
+  drawString((Units == "M" ? 500 : 480), 4, Date_str + "  @   " + Time_str, LEFT);
 }
 
 void DisplayWeatherIcon(int x, int y) {
@@ -403,7 +385,7 @@ void DisplayDisplayWindSection(int x, int y, float angle, float windspeed, int C
   setFont(OpenSans24B);
   drawString(x + 3, y - 18, String(windspeed, 1), CENTER);
   setFont(OpenSans12B);
-  drawString(x, y + 25, (Units == "M" ? "m/s" : "mph"), CENTER);
+  drawString(x, y + 22, (Units == "M" ? "m/s" : "mph"), CENTER);
 }
 
 String WindDegToOrdinalDirection(float winddirection) {
@@ -471,39 +453,24 @@ void DisplayVisiCCoverUVISection(int x, int y) {
 
 void Display_UVIndexLevel(int x, int y, float UVI) {
   String Level = "";
-  if (UVI <= 2)              Level = " (L)";
-  if (UVI >= 3 && UVI <= 5)  Level = " (M)";
-  if (UVI >= 6 && UVI <= 7)  Level = " (H)";
-  if (UVI >= 8 && UVI <= 10) Level = " (VH)";
-  if (UVI >= 11)             Level = " (EX)";
-  drawString(x + 20, y - 5, String(UVI, (UVI < 0 ? 1 : 0)) + Level, LEFT);
+  if (UVI <  2)              Level = " (L)";
+  if (UVI >= 2 && UVI <  5)  Level = " (M)";
+  if (UVI >= 5 && UVI <  7)  Level = " (H)";
+  if (UVI >= 7 && UVI <  10) Level = " (VH)";
+  if (UVI >= 10)             Level = " (EX)";
+  drawString(x + 20, y - 3, String(UVI, (UVI < 0 ? 1 : 0)) + Level, LEFT);
   DrawUVI(x - 10, y - 5);
-}
-
-void DisplayForecastWeather(int x, int y, int index, int fwidth) {
-  x = x + fwidth * index;
-  DisplayConditionsSection(x + fwidth / 2 - 5, y + 85, WxForecast[index].Icon, SmallIcon);
-  setFont(OpenSans10B);
-  drawString(x + fwidth / 2, y + 30, String(ConvertUnixTime(WxForecast[index].Dt + WxConditions[0].FTimezone).substring(0, 5)), CENTER);
-  drawString(x + fwidth / 2, y + 130, String(WxForecast[index].High, 0) + "°/" + String(WxForecast[index].Low, 0) + "°", CENTER);
-}
-
-double NormalizedMoonPhase(int d, int m, int y) {
-  int j = JulianDate(d, m, y);
-  //Calculate approximate moon phase
-  double Phase = (j + 4.867) / 29.53059;
-  return (Phase - (int) Phase);
 }
 
 void DisplayAstronomySection(int x, int y) {
   setFont(OpenSans10B);
   time_t now = time(NULL);
   struct tm * now_utc  = gmtime(&now);
-  drawString(x + 5, y + 102, MoonPhase(now_utc->tm_mday, now_utc->tm_mon + 1, now_utc->tm_year + 1900, Hemisphere), LEFT);
+  drawString(x + 5, y + 105, MoonPhase(now_utc->tm_mday, now_utc->tm_mon + 1, now_utc->tm_year + 1900, Hemisphere), LEFT);
   DrawMoonImage(x + 10, y + 23); // Different references!
   DrawMoon(x - 28, y - 15, 75, now_utc->tm_mday, now_utc->tm_mon + 1, now_utc->tm_year + 1900, Hemisphere); // Spaced at 1/2 moon size, so 10 - 75/2 = -28
-  drawString(x + 115, y + 40, ConvertUnixTime(WxConditions[0].Sunrise).substring(0, 5), LEFT); // Sunrise
-  drawString(x + 115, y + 80, ConvertUnixTime(WxConditions[0].Sunset).substring(0, 5), LEFT);  // Sunset
+  drawString(x + (Units == "M" ? 115 : 105), y + 38, ConvertUnixTime(WxConditions[0].Sunrise).substring(0, (Units == "M" ? 5 : 6)), LEFT); // Sunrise
+  drawString(x + (Units == "M" ? 115 : 105), y + 78, ConvertUnixTime(WxConditions[0].Sunset).substring(0, (Units == "M" ? 5 : 6)), LEFT); // Sunset
   DrawSunriseImage(x + 180, y + 20);
   DrawSunsetImage(x + 180, y + 60);
 }
@@ -573,11 +540,45 @@ String MoonPhase(int d, int m, int y, String hemisphere) {
 }
 
 void DisplayForecastSection(int x, int y) {
-  int f = 0;
+  int Forecast = 0, Dposition = 0;
   do {
-    DisplayForecastWeather(x, y, f, 82); // x,y cordinates, forecatsr number, spacing width
-    f++;
-  } while (f < 8);
+    DisplayForecastWeather(x, y, Forecast, Dposition, 82); // x,y cordinates, forecast number, spacing width
+    Forecast++;
+    Dposition++;
+  } while (Forecast <= 2);
+  String StartTime  = "08:00" + String((Units == "M"?"":"A"));
+  String MidTime    = "09:00" + String((Units == "M"?"":"A"));
+  String FinishTime = "10:00" + String((Units == "M"?"":"A"));
+  do {
+    String Ftime = ConvertUnixTime(WxForecast[Forecast].Dt).substring(0, (Units == "M"?5:6));
+    if (Ftime == StartTime || Ftime == MidTime || Ftime == FinishTime) {
+      DisplayForecastWeather(x, y, Forecast, Dposition, 82); // x,y cordinates, forecast number, position, spacing width
+      Dposition++;
+    }
+    Forecast++;
+  } while (Forecast < 40);
+}
+
+void DisplayForecastWeather(int x, int y, int forecast, int Dposition, int fwidth) {
+  x = x + fwidth * Dposition;
+  DisplayConditionsSection(x + fwidth / 2 - 5, y + 85, WxForecast[forecast].Icon, SmallIcon);
+  setFont(OpenSans10B);
+  if (forecast <= 2) {
+    drawString(x + fwidth / 2, y + 30, String(ConvertUnixTime(WxForecast[forecast].Dt).substring(0, (Units == "M" ? 5 : 6))), CENTER);
+  }
+  else
+  {
+    drawString(x + fwidth / 2 - 3, y + 30, ForecastDay, CENTER);
+  }
+  if (forecast < 3) drawString(x + fwidth / 2, y + 125, String(WxForecast[forecast].High, 0) + "°/" + String(WxForecast[forecast].Low, 0) + "°", CENTER);
+  else drawString(x + fwidth / 2, y + 125, String(HLReadings[Dposition - 3].High, 0) + "°/" + String(HLReadings[Dposition - 3].Low, 0) + "°", CENTER);
+}
+
+double NormalizedMoonPhase(int d, int m, int y) {
+  int j = JulianDate(d, m, y);
+  //Calculate approximate moon phase
+  double Phase = (j + 4.867) / 29.53059;
+  return (Phase - (int) Phase);
 }
 
 void DisplayGraphSection(int x, int y) {
@@ -606,16 +607,16 @@ void DisplayGraphSection(int x, int y) {
 
 void DisplayConditionsSection(int x, int y, String IconName, bool IconSize) {
   Serial.println("Icon name: " + IconName);
-  if      (IconName == "01d" || IconName == "01n") ClearSky(x, y, IconSize, IconName);
-  else if (IconName == "02d" || IconName == "02n") FewClouds(x, y, IconSize, IconName);
-  else if (IconName == "03d" || IconName == "03n") ScatteredClouds(x, y, IconSize, IconName);
-  else if (IconName == "04d" || IconName == "04n") BrokenClouds(x, y, IconSize, IconName);
-  else if (IconName == "09d" || IconName == "09n") ChanceRain(x, y, IconSize, IconName);
-  else if (IconName == "10d" || IconName == "10n") Rain(x, y, IconSize, IconName);
-  else if (IconName == "11d" || IconName == "11n") Thunderstorms(x, y, IconSize, IconName);
-  else if (IconName == "13d" || IconName == "13n") Snow(x, y, IconSize, IconName);
-  else if (IconName == "50d" || IconName == "50n") Mist(x, y, IconSize, IconName);
-  else                                             Nodata(x, y, IconSize, IconName);
+  if      (IconName == "01d" || IconName == "01n")  ClearSky(x, y, IconSize, IconName);
+  else if (IconName == "02d" || IconName == "02n")  FewClouds(x, y, IconSize, IconName);
+  else if (IconName == "03d" || IconName == "03n")  ScatteredClouds(x, y, IconSize, IconName);
+  else if (IconName == "04d" || IconName == "04n")  BrokenClouds(x, y, IconSize, IconName);
+  else if (IconName == "09d" || IconName == "09n")  ChanceRain(x, y, IconSize, IconName);
+  else if (IconName == "10d" || IconName == "10n")  Rain(x, y, IconSize, IconName);
+  else if (IconName == "11d" || IconName == "11n")  Thunderstorms(x, y, IconSize, IconName);
+  else if (IconName == "13d" || IconName == "13n")  Snow(x, y, IconSize, IconName);
+  else if (IconName == "50d" || IconName == "50n")  Mist(x, y, IconSize, IconName);
+  else                                              Nodata(x, y, IconSize, IconName);
 }
 
 void arrow(int x, int y, int asize, float aangle, int pwidth, int plength) {
@@ -675,6 +676,34 @@ void DrawRSSI(int x, int y, int rssi) {
   }
 }
 
+void GetHighsandLows() {
+  for (int d = 0; d < max_readings; d++) {
+    HLReadings[d].Time = "";
+    HLReadings[d].High = (Units == "M"?-50:-58);
+    HLReadings[d].Low  = (Units == "M"?70:158);
+  }
+  int Day = 0;
+  String StartTime  = "00:00" + String((Units == "M"?"":"A"));
+  String FinishTime = "02:00" + String((Units == "M"?"":"A"));
+  for (int r = 0; r < max_readings; r++) {
+    if (ConvertUnixTime(WxForecast[r].Dt).substring(0, (Units == "M"?5:6)) >= StartTime && ConvertUnixTime(WxForecast[r].Dt).substring(0, (Units == "M"?5:6)) <= FinishTime) { // found first period in day 
+      HLReadings[Day].Time = ConvertUnixTime(WxForecast[r].Dt).substring(0, (Units == "M"?5:6));
+      for (int InDay = 0; InDay < 8; InDay++) { // 00:00 to 21:00 is 8 readings
+        if (r + InDay < max_readings) {
+          if (WxForecast[r + InDay].High > HLReadings[Day].High) {
+            HLReadings[Day].High = WxForecast[r + InDay].High;
+          }
+          if (WxForecast[r + InDay].Low  < HLReadings[Day].Low)  {
+            HLReadings[Day].Low  = WxForecast[r + InDay].Low;
+          }
+        }
+      }
+      //Serial.println("Day=" + HLReadings[Day].Time + " " + String(HLReadings[Day].High) + " " + String(HLReadings[Day].Low));
+      Day++;
+    }
+  }
+} // Now the array HLReadings has 5-days of Highs and Lows
+
 boolean UpdateLocalTime() {
   struct tm timeinfo;
   char   time_output[30], day_output[30], update_time[30];
@@ -703,6 +732,24 @@ boolean UpdateLocalTime() {
   return true;
 }
 
+//#########################################################################################
+String ConvertUnixTime(int unix_time) {
+  // Returns either '21:12  ' or ' 09:12pm' depending on Units mode
+  time_t tm = unix_time;
+  struct tm *now_tm = localtime(&tm);
+  char output[40], FDay[40];
+  if (Units == "M") {
+    strftime(output, sizeof(output), "%H:%M %d/%m/%y", now_tm);
+    strftime(FDay, sizeof(FDay), "%w", now_tm);
+  }
+  else {
+    strftime(output, sizeof(output), "%I:%M%p %m/%d/%y", now_tm);
+    strftime(FDay, sizeof(FDay), "%w", now_tm);
+  }
+  ForecastDay = weekday_D[String(FDay).toInt()];
+  return output;
+}
+//#########################################################################################
 void DrawBattery(int x, int y) {
   uint8_t percentage = 100;
   esp_adc_cal_characteristics_t adc_chars;
@@ -717,9 +764,9 @@ void DrawBattery(int x, int y) {
     percentage = 2836.9625 * pow(voltage, 4) - 43987.4889 * pow(voltage, 3) + 255233.8134 * pow(voltage, 2) - 656689.7123 * voltage + 632041.7303;
     if (voltage >= 4.20) percentage = 100;
     if (voltage <= 3.20) percentage = 0;  // orig 3.5
-    drawRect(x + 25, y - 14, 40, 15, Black);
-    fillRect(x + 65, y - 10, 4, 7, Black);
-    fillRect(x + 27, y - 12, 36 * percentage / 100.0, 11, Black);
+    drawRect(x + 25, y - 16, 40, 15, Black);
+    fillRect(x + 65, y - 12, 4, 7, Black);
+    fillRect(x + 27, y - 14, 36 * percentage / 100.0, 11, Black);
     drawString(x + 85, y - 14, String(percentage) + "%  " + String(voltage, 1) + "v", LEFT);
   }
 }
@@ -766,14 +813,20 @@ void addtstorm(int x, int y, int scale) {
   y = y + scale / 2;
   for (int i = 1; i < 5; i++) {
     drawLine(x - scale * 4 + scale * i * 1.5 + 0, y + scale * 1.5, x - scale * 3.5 + scale * i * 1.5 + 0, y + scale, Black);
-    drawLine(x - scale * 4 + scale * i * 1.5 + 1, y + scale * 1.5, x - scale * 3.5 + scale * i * 1.5 + 1, y + scale, Black);
-    drawLine(x - scale * 4 + scale * i * 1.5 + 2, y + scale * 1.5, x - scale * 3.5 + scale * i * 1.5 + 2, y + scale, Black);
+    if (scale != Small) {
+      drawLine(x - scale * 4 + scale * i * 1.5 + 1, y + scale * 1.5, x - scale * 3.5 + scale * i * 1.5 + 1, y + scale, Black);
+      drawLine(x - scale * 4 + scale * i * 1.5 + 2, y + scale * 1.5, x - scale * 3.5 + scale * i * 1.5 + 2, y + scale, Black);
+    }
     drawLine(x - scale * 4 + scale * i * 1.5, y + scale * 1.5 + 0, x - scale * 3 + scale * i * 1.5 + 0, y + scale * 1.5 + 0, Black);
-    drawLine(x - scale * 4 + scale * i * 1.5, y + scale * 1.5 + 1, x - scale * 3 + scale * i * 1.5 + 0, y + scale * 1.5 + 1, Black);
-    drawLine(x - scale * 4 + scale * i * 1.5, y + scale * 1.5 + 2, x - scale * 3 + scale * i * 1.5 + 0, y + scale * 1.5 + 2, Black);
+    if (scale != Small) {
+      drawLine(x - scale * 4 + scale * i * 1.5, y + scale * 1.5 + 1, x - scale * 3 + scale * i * 1.5 + 0, y + scale * 1.5 + 1, Black);
+      drawLine(x - scale * 4 + scale * i * 1.5, y + scale * 1.5 + 2, x - scale * 3 + scale * i * 1.5 + 0, y + scale * 1.5 + 2, Black);
+    }
     drawLine(x - scale * 3.5 + scale * i * 1.4 + 0, y + scale * 2.5, x - scale * 3 + scale * i * 1.5 + 0, y + scale * 1.5, Black);
-    drawLine(x - scale * 3.5 + scale * i * 1.4 + 1, y + scale * 2.5, x - scale * 3 + scale * i * 1.5 + 1, y + scale * 1.5, Black);
-    drawLine(x - scale * 3.5 + scale * i * 1.4 + 2, y + scale * 2.5, x - scale * 3 + scale * i * 1.5 + 2, y + scale * 1.5, Black);
+    if (scale != Small) {
+      drawLine(x - scale * 3.5 + scale * i * 1.4 + 1, y + scale * 2.5, x - scale * 3 + scale * i * 1.5 + 1, y + scale * 1.5, Black);
+      drawLine(x - scale * 3.5 + scale * i * 1.4 + 2, y + scale * 2.5, x - scale * 3 + scale * i * 1.5 + 2, y + scale * 1.5, Black);
+    }
   }
 }
 
@@ -781,8 +834,8 @@ void addsun(int x, int y, int scale, bool IconSize) {
   int linesize = 5;
   fillRect(x - scale * 2, y, scale * 4, linesize, Black);
   fillRect(x, y - scale * 2, linesize, scale * 4, Black);
-  DrawAngledLine(x + scale * 1.4, y + scale * 1.4, (x - scale * 1.4), (y - scale * 1.4), linesize * 1.5, Black); // Actually sqrt(2) but 1.4 is good enough
-  DrawAngledLine(x - scale * 1.4, y + scale * 1.4, (x + scale * 1.4), (y - scale * 1.4), linesize * 1.5, Black);
+  DrawAngledLine(x + scale * 1.4, y + scale * 1.4, (x - scale * 1.4), (y - scale * 1.4), linesize, Black); // Actually sqrt(2) but 1.4 is good enough
+  DrawAngledLine(x - scale * 1.4, y + scale * 1.4, (x + scale * 1.4), (y - scale * 1.4), linesize, Black);
   fillCircle(x, y, scale * 1.3, White);
   fillCircle(x, y, scale, Black);
   fillCircle(x, y, scale - linesize, White);
@@ -808,8 +861,11 @@ void ClearSky(int x, int y, bool IconSize, String IconName) {
   int scale = Small;
   if (IconName.endsWith("n")) addmoon(x, y, IconSize);
   if (IconSize == LargeIcon) scale = Large;
-  y += (IconSize ? 0 : 10);
-  addsun(x, y, scale * (IconSize ? 1.7 : 1.2), IconSize);
+  else {
+    y -= 3; // Shift up small sun icon
+    scale *= 0.8;
+  }
+  addsun(x, y, scale * 1.6, IconSize);
 }
 
 void BrokenClouds(int x, int y, bool IconSize, String IconName) {
@@ -819,6 +875,14 @@ void BrokenClouds(int x, int y, bool IconSize, String IconName) {
   if (IconSize == LargeIcon) scale = Large;
   addsun(x - scale * 1.8, y - scale * 1.8, scale, IconSize);
   addcloud(x, y, scale * (IconSize ? 1 : 0.75), linesize);
+}
+
+void MostlyCloudy(int x, int y, bool IconSize, String IconName) {
+  int scale = Small, linesize = 5;
+  if (IconName.endsWith("n")) addmoon(x, y, IconSize);
+  if (IconSize == LargeIcon) scale = Large;
+  addcloud(x, y, scale, linesize);
+  addsun(x - scale * 1.8, y - scale * 1.8, scale, IconSize);
 }
 
 void FewClouds(int x, int y, bool IconSize, String IconName) {
@@ -842,9 +906,21 @@ void ScatteredClouds(int x, int y, bool IconSize, String IconName) {
 void Rain(int x, int y, bool IconSize, String IconName) {
   int scale = Small, linesize = 5;
   if (IconName.endsWith("n")) addmoon(x, y, IconSize);
-  y += 15;
   if (IconSize == LargeIcon) scale = Large;
-  addcloud(x, y, scale * (IconSize ? 1 : 0.75), linesize);
+  else {
+    scale *= 0.7;
+    y += 8;
+  }
+  addcloud(x, y, scale, linesize);
+  addrain(x, y, scale, IconSize);
+}
+
+void ExpectRain(int x, int y, bool IconSize, String IconName) {
+  int scale = Small, linesize = 5;
+  if (IconName.endsWith("n")) addmoon(x, y, IconSize);
+  if (IconSize == LargeIcon) scale = Large;
+  addsun(x - scale * 1.8, y - scale * 1.8, scale, IconSize);
+  addcloud(x, y, scale, linesize);
   addrain(x, y, scale, IconSize);
 }
 
@@ -852,9 +928,8 @@ void ChanceRain(int x, int y, bool IconSize, String IconName) {
   int scale = Small, linesize = 5;
   if (IconName.endsWith("n")) addmoon(x, y, IconSize);
   if (IconSize == LargeIcon) scale = Large;
-  y += 15;
   addsun(x - scale * 1.8, y - scale * 1.8, scale, IconSize);
-  addcloud(x, y, scale * (IconSize ? 1 : 0.65), linesize);
+  addcloud(x, y, scale * (IconSize ? 1 : 0.75), linesize);
   addrain(x, y, scale, IconSize);
 }
 
@@ -862,7 +937,6 @@ void Thunderstorms(int x, int y, bool IconSize, String IconName) {
   int scale = Small, linesize = 5;
   if (IconName.endsWith("n")) addmoon(x, y, IconSize);
   if (IconSize == LargeIcon) scale = Large;
-  y += 5;
   addcloud(x, y, scale * (IconSize ? 1 : 0.75), linesize);
   addtstorm(x, y, scale);
 }
@@ -879,7 +953,7 @@ void Mist(int x, int y, bool IconSize, String IconName) {
   int scale = Small, linesize = 5;
   if (IconName.endsWith("n")) addmoon(x, y, IconSize);
   if (IconSize == LargeIcon) scale = Large;
-  addsun(x, y, scale * (IconSize ? 1 : 0.75), linesize);
+  addcloud(x, y, scale * (IconSize ? 1 : 0.75), linesize);
   addfog(x, y, scale, linesize, IconSize);
 }
 
@@ -1019,9 +1093,9 @@ void DrawGraph(int x_pos, int y_pos, int gwidth, int gheight, float Y1Min, float
       }
     }
   }
-  for (int i = 0; i < 3; i++) {
-    drawString(20 + x_pos + gwidth / 3 * i, y_pos + gheight + 10, String(i) + "d", LEFT);
-    if (i < 2) drawFastVLine(x_pos + gwidth / 3 * i + gwidth / 3, y_pos, gheight, LightGrey);
+  for (int d = 0; d < 5; d++) {
+    drawString(5 + x_pos + gwidth / 5 * d, y_pos + gheight + 10, String(d + 1) + "d", LEFT);
+    if (d < 5) drawFastVLine(x_pos + gwidth / 5 * d + gwidth / 5, y_pos, gheight, LightGrey);
   }
 }
 
@@ -1082,5 +1156,5 @@ void edp_update() {
   epd_draw_grayscale_image(epd_full_screen(), framebuffer); // Update the screen
 }
 /*
-   1071 lines of code 03-03-2021
+   1116 lines of code 15-03-2021
 */
